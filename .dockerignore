@@ -1,0 +1,13 @@
+.devcontainer/
+.vscode/
+.idea/
+.git/
+
+target/
+
+libseccomp/
+
+.gitignore
+.gitmodules
+
+Dockefile
