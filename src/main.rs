@@ -131,7 +131,69 @@ impl BenchOptions {
 }
 
 fn bench_seccomp(options: &BenchOptions) -> Result<()> {
-    unimplemented!()
+    match nix::unistd::fork()? {
+        nix::unistd::ForkResult::Child => {
+            let prog = CString::new(std::env::current_exe().unwrap().to_str().unwrap()).unwrap();
+            let args = vec![
+                prog.clone(),
+                CString::new("--mode").unwrap(),
+                CString::new("payload").unwrap(),
+                CString::new("--iter").unwrap(),
+                CString::new(options.iterations.to_string()).unwrap(),
+            ];
+            let arg_refs = args.iter().map(|s| s.as_c_str()).collect::<Vec<&CStr>>();
+
+            // Setup seccomp environment.
+            let seccomp = unsafe { seccomp_sys::seccomp_init(seccomp_sys::SCMP_ACT_ALLOW) };
+            if seccomp.is_null() {
+                return Err(Error::from("seccomp_init failed."));
+            }
+
+            for scid in &options.disallowed_syscalls {
+                let ret = unsafe {
+                    seccomp_sys::seccomp_rule_add_array(
+                        seccomp, seccomp_sys::SCMP_ACT_KILL, *scid as i32,
+                        0, std::ptr::null())
+                };
+                if ret < 0 {
+                    return Err(Error::from(
+                        format!("failed to install seccomp filter for syscall {}", scid)));
+                }
+            }
+
+            let ret = unsafe { seccomp_sys::seccomp_load(seccomp) };
+            if ret < 0 {
+                return Err(Error::from("seccomp_load failed."));
+            }
+
+            unsafe { seccomp_sys::seccomp_release(seccomp) };
+
+            nix::unistd::execv(&prog, &arg_refs)
+                .chain_err(|| "execv failed")?;
+            unreachable!()
+        },
+        nix::unistd::ForkResult::Parent { child } => {
+            let start_time = Instant::now();
+
+            let status = nix::sys::wait::waitpid(child, None)
+                .chain_err(|| "wait for exit failed")?;
+            match status {
+                nix::sys::wait::WaitStatus::Exited(_, code) => {
+                    println!("child exited with exit code {}", code);
+                },
+                nix::sys::wait::WaitStatus::Signaled(_, sig, _) => {
+                    println!("child aborted by signal {}", sig);
+                },
+                _ => unreachable!()
+            };
+
+            let end_time = Instant::now();
+            let elapsed = end_time - start_time;
+            println!("benchmark finished within {} ms.", elapsed.as_millis());
+
+            Ok(())
+        }
+    }
 }
 
 fn bench_ptrace(options: &BenchOptions) -> Result<()> {
